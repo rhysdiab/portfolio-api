@@ -6,47 +6,30 @@ A TypeScript REST API for managing investment portfolios and calculating money-w
 
 ## Getting Started
 
-### Prerequisites
-
-- Node.js >= 18
-- npm
-
-### Install
-
 ```bash
 npm install
+npm test       # run full test suite
+npm run dev    # start server at http://localhost:3000
 ```
 
-### Price Data
-
-The returns endpoint requires the ASX price dataset placed at `data/prices.csv`. The file is tab-separated with the following columns (among others):
-
-```
-TICKER_SYMBOL    PRICING_DATE                PRICE_CLOSE
-ORG              2026-02-04 00:00:00+00      11.12
-```
-
-The price service reads `TICKER_SYMBOL`, `PRICING_DATE` (date portion only), and `PRICE_CLOSE` (AUD). Column order does not matter — headers are resolved by name.
-
-The entire file is loaded into memory on startup. This is a deliberate shortcut for the scope of this challenge — see [Shortcuts Taken](#shortcuts-taken) for the production alternative.
-
-### Run
-
-```bash
-npm run dev
-```
-
-Server starts at `http://localhost:3000`.
-
-### Test
-
-```bash
-npm test
-```
+`mwr-verification.test.ts` loads `data/prices.csv` directly — the full dataset must be present for those tests to pass. All other tests use injected prices and run without it.
 
 ---
 
-## API Reference
+## Data Model
+
+```typescript
+Portfolio    { id, name, currency, createdAt }
+
+Transaction  { id, portfolioId, type: 'buy' | 'sell',
+               ticker, date, amount, price, currency }
+```
+
+`currency` is stored on each transaction as specified in the brief. FX conversion is a shortcut — see below.
+
+---
+
+## API
 
 ### Portfolios
 
@@ -55,37 +38,17 @@ npm test
 | `POST` | `/portfolios` | Create a portfolio |
 | `GET` | `/portfolios` | List all portfolios |
 | `GET` | `/portfolios/:id` | Get a portfolio |
-| `DELETE` | `/portfolios/:id` | Delete a portfolio and its transactions |
-
-**Create portfolio request body:**
-```json
-{
-  "name": "My ASX Portfolio",
-  "currency": "AUD"
-}
-```
+| `DELETE` | `/portfolios/:id` | Delete portfolio and its transactions |
 
 ### Transactions
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/portfolios/:id/transactions` | Add a transaction |
-| `GET` | `/portfolios/:id/transactions` | List transactions (filterable) |
+| `GET` | `/portfolios/:id/transactions` | List transactions |
 | `DELETE` | `/portfolios/:id/transactions/:txId` | Remove a transaction |
 
-**Add transaction request body:**
-```json
-{
-  "type": "buy",
-  "ticker": "CBA",
-  "date": "2023-01-10",
-  "amount": 10,
-  "price": 97.50,
-  "currency": "AUD"
-}
-```
-
-**List transactions query params:** `?from=YYYY-MM-DD&to=YYYY-MM-DD&ticker=CBA`
+`GET /portfolios/:id/transactions` supports optional query params: `?from=YYYY-MM-DD&to=YYYY-MM-DD&ticker=CBA`
 
 ### Returns
 
@@ -93,105 +56,137 @@ npm test
 GET /portfolios/:id/returns?from=YYYY-MM-DD&to=YYYY-MM-DD
 ```
 
-**Response:**
 ```json
 {
   "portfolioId": "abc-123",
-  "from": "2023-01-01",
-  "to": "2023-12-31",
-  "mwr": 0.1243,
-  "beginningValue": 10000.00,
-  "endingValue": 11800.00,
-  "netCashFlow": -500.00
+  "from": "2025-10-29",
+  "to": "2026-02-04",
+  "mwr": -0.6473,
+  "holdingPeriodReturn": -0.1966,
+  "beginningValue": 5178.00,
+  "endingValue": 4082.00,
+  "netCashFlow": -379.00
 }
 ```
 
-`mwr` is the annualised money-weighted return as a decimal (e.g. `0.1243` = 12.43%).
+- `mwr` — annualised money-weighted return (e.g. `-0.6473` = -64.73%)
+- `holdingPeriodReturn` — raw return over the period, not annualised
 
 ---
 
 ## Return Calculation
 
-The money-weighted return (MWR) is calculated as the **Internal Rate of Return (IRR)** of all portfolio cash flows over the period:
+The core function is `calculateMWR` in `src/calculations/returns.ts`. It is fully decoupled from Express and takes plain arrays — no HTTP context.
 
-- **t = 0**: Beginning portfolio value is treated as an outflow (the cost to hold the portfolio entering the period)
-- **Mid-period**: Each buy is a negative cash flow (capital deployed), each sell is a positive cash flow (capital returned)
-- **t = end**: Ending portfolio value is treated as an inflow (notional liquidation)
+MWR is calculated as the **IRR** of all portfolio cash flows:
 
-The IRR is solved numerically using **Newton-Raphson** with actual/365 day-count convention, giving an annualised rate.
+- **t = 0** — beginning portfolio value (outflow)
+- **mid-period** — buys are negative cash flows, sells are positive
+- **t = end** — ending portfolio value marked to market (inflow)
 
 ```
 NPV = Σ [ CF_i / (1 + r)^(t_i / 365) ] = 0
 ```
 
-MWR reflects the impact of the timing and size of cash flows — larger investments made before strong performance periods are rewarded more than those made before weak ones.
+Solved numerically using Newton-Raphson with actual/365 day-count, giving an annualised rate.
+
+The implementation has been verified against Simply Wall St using real ASX prices for ZIP and NXT — results match to within rounding (-61.66% vs -61.7%).
+
+**Why MWR over TWR:** MWR reflects the investor's actual experience — the timing and size of capital deployed affects the result. TWR eliminates cash flow effects and is more appropriate for benchmarking a fund manager against an index.
+
+**Why IRR over Modified Dietz:** Modified Dietz is a linear approximation that works well for small cash flows but diverges materially when large transactions occur mid-period. IRR is exact.
 
 ---
 
 ## Shortcuts Taken
 
-These are intentional simplifications given the scope of the challenge.
-
 ### Storage
 **Current:** In-memory `Map` — data is lost on restart.
 
-**Production:** A relational database (PostgreSQL) with separate `portfolios` and `transactions` tables. Transactions should be append-only with no updates to preserve a full audit trail. Indexes on `(portfolio_id, date)` for efficient range queries.
+**Production:** PostgreSQL with `portfolios` and `transactions` tables. Transactions should be append-only to preserve an audit trail. Index on `(portfolio_id, date)` for efficient range queries.
 
 ### Currency
-**Current:** All prices and transaction values are assumed to be in AUD. No FX conversion is applied.
+**Current:** `currency` is stored on each transaction but no FX conversion is applied — all values are assumed to be in AUD.
 
-**Production:** Each price record and transaction would carry a currency code. A FX rate service (e.g. RBA rates or a vendor feed) would convert all values to the portfolio's base currency before calculating holdings value.
+**Production:** FX rates (e.g. RBA feed) applied at calculation time to convert all positions to the portfolio's base currency.
 
-### Price Lookup & Date Range
-**Current:** CSV loaded entirely into memory at startup. `getPriceOnOrBefore` does a simple day-by-day lookback of up to 7 days to handle weekends. Portfolio values can only be calculated for dates within the dataset range (2025-10-29 to 2026-02-04) — passing a date outside this range will return a missing prices error. There is no concept of a "current" price.
+### Price Lookup
+**Current:** Full CSV loaded into memory at startup. `getPriceOnOrBefore` looks back up to 7 days to handle weekends. Returns are limited to dates within the dataset range (2025-10-29 to 2026-02-04) — there is no concept of a current price.
 
-**Production:** A live market data feed would provide current prices, removing the dependency on a static date range. A time-series database (e.g. TimescaleDB) with a proper ASX trading calendar would handle holiday-aware lookback. Prices would be fetched on demand with a cache layer (Redis) rather than held in memory.
+**Production:** Live market data feed for current prices. TimescaleDB with a proper ASX trading calendar for holiday-aware lookback. On-demand fetching with a Redis cache layer.
 
 ### IRR Solver
-**Current:** Newton-Raphson with a fixed initial guess of 10%. Can fail to converge for unusual cash flow patterns (e.g. multiple sign changes).
+**Current:** Newton-Raphson with a fixed initial guess of 10%. Can fail to converge for non-conventional cash flow patterns (multiple sign changes).
 
-**Production:** A hybrid approach — Newton-Raphson with a bisection fallback over a bounded interval. Multiple sign changes in cash flows (non-conventional) can produce multiple IRR solutions; these cases would require a modified IRR (MIRR) or explicit handling.
+**Production:** Newton-Raphson with a bisection fallback. Multiple sign changes can produce multiple valid IRR solutions — these cases would require Modified IRR (MIRR).
 
-### Authentication & Authorisation
-**Current:** No auth. Any caller can read or modify any portfolio.
+### Auth, Validation & Pagination
+**Current:** No authentication. Basic field validation. All transactions returned in a single response.
 
-**Production:** JWT-based auth with user ownership of portfolios. Role-based access for read-only vs. read-write operations.
-
-### Validation
-**Current:** Basic field presence and type checks on request bodies.
-
-**Production:** A schema validation library (e.g. Zod) for strict input validation, including date format, positive amounts, and known ticker symbols.
-
-### Pagination
-**Current:** `GET /portfolios/:id/transactions` returns all records.
-
-**Production:** Cursor-based pagination to handle portfolios with large transaction histories.
+**Production:** JWT auth with portfolio ownership. Zod schema validation. Cursor-based pagination.
 
 ---
 
 ## Future Implementations
 
-- **Time-weighted return (TWR):** Sub-period linking using daily valuations. More appropriate for benchmarking portfolio managers against an index since it eliminates the effect of external cash flows.
-- **Multi-currency portfolios:** Aggregate holdings across currencies with live or end-of-day FX rates.
-- **Benchmarking:** Compare portfolio MWR against an index (e.g. ASX 200) over the same period.
-- **Unrealised / realised P&L breakdown:** Split return attribution between open positions and closed trades.
-- **Dividends:** Dividends are out of scope — the provided dataset contains no dividend data and the transaction spec defines only buy/sell. If dividends were included, cash dividends would be treated as positive mid-period cash flows in the MWR calculation (increasing the numerator), and DRP (dividend reinvestment) would be modelled as a synthetic buy transaction at the ex-dividend price.
-- **Corporate actions:** Handle stock splits and rights issues in the holdings calculation.
-- **Streaming price updates:** WebSocket feed to update holdings value in real time.
+- **Time-weighted return (TWR):** Daily sub-period linking for benchmarking against an index
+- **Dividends:** Out of scope — the dataset contains no dividend data and the transaction spec defines only buy/sell. If included, cash dividends would be positive mid-period cash flows in the MWR calculation; DRP would be a synthetic buy at the ex-dividend price
+- **Multi-currency:** FX conversion at calculation time using end-of-day rates
+- **Benchmarking:** Compare portfolio MWR against ASX 200 over the same period
+- **Corporate actions:** Stock splits and rights issues in the holdings calculation
+- **Unrealised / realised P&L:** Attribution between open positions and closed trades
 
 ---
 
 ## Use of AI
 
-Claude Code (Anthropic) was used throughout this challenge as a development assistant. Specifically:
+Claude Code (Anthropic) was used throughout as a development assistant:
 
-- **Project scaffolding:** Generated the initial Express project structure, `tsconfig.json`, and `package.json` based on a description of the requirements.
-- **IRR solver:** Used AI to produce the Newton-Raphson implementation and verify the cash flow sign conventions against the MWR definition. The logic was reviewed and tested manually to confirm correctness.
-- **Test generation:** AI drafted the initial unit and integration tests, which were then extended and refined — particularly the return calculation scenarios using real DDR prices from the dataset.
-- **Dataset parsing:** When the real ASX CSV was provided, AI identified the column structure and updated the price service parser accordingly.
-- **Code review:** Used AI to identify and remove unused imports and dead code (e.g. an unreachable route handler left over from a refactor).
+- **Challenge checklist:** Used AI to break the brief into a checklist of sections to work through — API design, return function, shortcuts, future implementations, and AI usage — ensuring nothing was missed
+- **Scaffolding:** Generated initial project structure, config files, and Express boilerplate
+- **IRR solver:** Produced the Newton-Raphson implementation and verified cash flow sign conventions — reviewed and validated manually
+- **Tests:** Drafted unit and integration tests, refined with real dataset prices
+- **Dataset parsing:** Identified CSV column structure and updated the price service parser
+- **Code review:** Identified unused imports and dead code
 
-The core design decisions — API structure, choice of MWR over TWR, Modified Dietz vs IRR, and the separation of calculation logic from the HTTP layer — were made independently and then validated through conversation with the AI.
+- **Scaling architecture:** Workshopped different approaches to scaling the return calculation — on-demand vs pre-computed with SQS + Lambda, trade-offs between live prices and end-of-day MWR, and when a Redis cache is appropriate vs stale
+
+Core design decisions — API structure, MWR vs TWR, IRR vs Modified Dietz, decoupling calculation logic from HTTP — were made independently and validated through conversation with the AI.
+
+---
+
+## Deployment & Scaling
+
+### Containerisation
+The API would be packaged as a Docker image and deployed behind a load balancer. A `Dockerfile` would build the TypeScript, expose port 3000, and run `node dist/index.js`. Environment variables would configure the database connection, port, and any secrets.
+
+### AWS Architecture
+```
+Route 53 → ALB → ECS (Fargate) → RDS (PostgreSQL)
+                               → ElastiCache (Redis)
+                               → S3 (price data / static assets)
+```
+
+- **ECS Fargate** — runs the containerised API, scales horizontally based on CPU/memory. No servers to manage.
+- **RDS PostgreSQL** — replaces the in-memory store. Multi-AZ for high availability, read replicas for query-heavy workloads.
+- **ElastiCache (Redis)** — caches price lookups so repeated return calculations don't re-query the database.
+- **ALB** — distributes traffic across containers, handles SSL termination.
+
+### Scaling Considerations
+
+**Price ingestion** would be a separate service — a scheduled Lambda (triggered by EventBridge at market close) ingests daily ASX closing prices into the database, completely decoupled from the API.
+
+**Return calculation** is CPU-bound (IRR iteration). The queue/cache approach below is appropriate for **end-of-day returns**, which is the correct use case for MWR — it is a long-term performance metric, not a live number. Most portfolio trackers (e.g. Simply Wall St) calculate MWR using end-of-day prices, not live prices. Recalculating IRR every second against a live feed is not meaningful and prohibitively expensive.
+
+For **live portfolio value** (intraday), a simpler calculation suffices: `current price × units − cost basis`. No IRR needed.
+
+Two scaling approaches depending on requirements:
+
+**Option 1 — On-demand (current approach)**
+User requests returns → calculate fresh against latest end-of-day prices → return immediately. Simple, always accurate, sufficient for moderate load.
+
+**Option 2 — Pre-computed with queue (high scale)**
+A nightly job fans out return calculations across all portfolios via SQS + Lambda workers. Results are written to Redis. The API returns the cached result instantly. Cache is invalidated when a new transaction is added or new prices are ingested. This decouples read performance from calculation cost and scales to millions of portfolios.
 
 ---
 
@@ -200,21 +195,21 @@ The core design decisions — API structure, choice of MWR over TWR, Modified Di
 ```
 portfolio-api/
 ├── src/
-│   ├── index.ts                      # Server entry point (starts Express)
-│   ├── app.ts                        # Express app setup (importable for tests)
+│   ├── index.ts                      # Server entry point
+│   ├── app.ts                        # Express app (importable for tests)
 │   ├── store.ts                      # In-memory data store
 │   ├── types.ts                      # Shared TypeScript types
 │   ├── routes/
 │   │   ├── portfolios.ts             # Portfolio CRUD + returns endpoint
-│   │   └── transactions.ts           # Transaction CRUD routes
+│   │   └── transactions.ts           # Transaction CRUD
 │   ├── services/
 │   │   └── priceService.ts           # CSV price loader and lookup
 │   └── calculations/
 │       └── returns.ts                # MWR / IRR calculation (core logic)
 ├── tests/
-│   ├── returns.test.ts               # Unit tests for calculation layer
-│   ├── api.test.ts                   # Integration tests for all API endpoints
-│   └── mwr-verification.test.ts     # MWR verified against Simply Wall St using real ASX prices
+│   ├── returns.test.ts               # Unit tests — calculation layer
+│   ├── api.test.ts                   # Integration tests — all API endpoints
+│   └── mwr-verification.test.ts      # MWR verified against Simply Wall St (real ASX prices)
 └── data/
-    └── prices.csv                    # ASX price data (not committed)
+    └── prices.csv                    # ASX price dataset
 ```
