@@ -14,8 +14,6 @@ npm test       # run full test suite
 npm run dev    # start server at http://localhost:3000
 ```
 
-`mwr-verification.test.ts` loads `data/prices.csv` directly — the full dataset must be present for those tests to pass. All other tests use injected prices and run without it.
-
 ---
 
 ## Data Model
