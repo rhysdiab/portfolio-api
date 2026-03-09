@@ -6,6 +6,8 @@ A TypeScript REST API for managing investment portfolios and calculating money-w
 
 ## Getting Started
 
+Tested on Node.js v20. Requires Node.js >= 18.
+
 ```bash
 npm install
 npm test       # run full test suite
