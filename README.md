@@ -138,24 +138,9 @@ The implementation has been verified against Simply Wall St using real ASX price
 
 ---
 
-## Use of AI
-
-Claude Code (Anthropic) was used throughout as a development assistant:
-
-- **Challenge checklist:** Used AI to break the brief into a checklist of sections to work through — API design, return function, shortcuts, future implementations, and AI usage — ensuring nothing was missed
-- **Scaffolding:** Generated initial project structure, config files, and Express boilerplate
-- **IRR solver:** Produced the Newton-Raphson implementation and verified cash flow sign conventions — reviewed and validated manually
-- **Tests:** Drafted unit and integration tests, refined with real dataset prices
-- **Dataset parsing:** Identified CSV column structure and updated the price service parser
-- **Code review:** Identified unused imports and dead code
-
-- **Scaling architecture:** Workshopped different approaches to scaling the return calculation — on-demand vs pre-computed with SQS + Lambda, trade-offs between live prices and end-of-day MWR, and when a Redis cache is appropriate vs stale
-
-Core design decisions — API structure, MWR vs TWR, IRR vs Modified Dietz, decoupling calculation logic from HTTP — were made independently and validated through conversation with the AI.
-
----
-
 ## Deployment & Scaling
+
+> The following describes how this API would be deployed and scaled in a production environment. For this challenge the server runs locally via `npm run dev`.
 
 ### Containerisation
 The API would be packaged as a Docker image and deployed behind a load balancer. A `Dockerfile` would build the TypeScript, expose port 3000, and run `node dist/index.js`. Environment variables would configure the database connection, port, and any secrets.
@@ -169,24 +154,35 @@ Route 53 → ALB → ECS (Fargate) → RDS (PostgreSQL)
 
 - **ECS Fargate** — runs the containerised API, scales horizontally based on CPU/memory. No servers to manage.
 - **RDS PostgreSQL** — replaces the in-memory store. Multi-AZ for high availability, read replicas for query-heavy workloads.
-- **ElastiCache (Redis)** — caches price lookups so repeated return calculations don't re-query the database.
+- **ElastiCache (Redis)** — caches calculated returns so repeated requests don't re-run the IRR solver.
 - **ALB** — distributes traffic across containers, handles SSL termination.
 
 ### Scaling Considerations
 
-**Price ingestion** would be a separate service — a scheduled Lambda (triggered by EventBridge at market close) ingests daily ASX closing prices into the database, completely decoupled from the API.
-
-**Return calculation** is CPU-bound (IRR iteration). The queue/cache approach below is appropriate for **end-of-day returns**, which is the correct use case for MWR — it is a long-term performance metric, not a live number. Most portfolio trackers (e.g. Simply Wall St) calculate MWR using end-of-day prices, not live prices. Recalculating IRR every second against a live feed is not meaningful and prohibitively expensive.
-
-For **live portfolio value** (intraday), a simpler calculation suffices: `current price × units − cost basis`. No IRR needed.
-
-Two scaling approaches depending on requirements:
+MWR is calculated using end-of-day prices — this is the industry standard (e.g. Simply Wall St). A scheduled Lambda (triggered by EventBridge at market close) ingests daily ASX closing prices into the database, decoupled from the API.
 
 **Option 1 — On-demand (current approach)**
-User requests returns → calculate fresh against latest end-of-day prices → return immediately. Simple, always accurate, sufficient for moderate load.
+User requests returns → calculate fresh against latest end-of-day prices → return immediately. Simple and accurate, sufficient for moderate load.
 
 **Option 2 — Pre-computed with queue (high scale)**
 A nightly job fans out return calculations across all portfolios via SQS + Lambda workers. Results are written to Redis. The API returns the cached result instantly. Cache is invalidated when a new transaction is added or new prices are ingested. This decouples read performance from calculation cost and scales to millions of portfolios.
+
+---
+
+## Use of AI
+
+Claude Code (Anthropic) was used throughout as a development assistant:
+
+- **Challenge checklist:** Used AI to break the brief into a checklist of sections to work through — API design, return function, shortcuts, future implementations, and AI usage — ensuring nothing was missed
+- **Scaffolding:** Generated initial project structure, config files, and Express boilerplate
+- **IRR solver:** Produced the Newton-Raphson implementation and verified cash flow sign conventions — reviewed and validated manually
+- **Tests:** Drafted unit and integration tests, refined with real dataset prices
+- **Dataset parsing:** Identified CSV column structure and updated the price service parser
+- **Code review:** Identified unused imports and dead code
+- **README:** Sections were written by AI based on direct instruction — API design, shortcuts, future implementations, deployment architecture, and the AI usage section itself. Content was reviewed and refined through conversation
+- **Scaling architecture:** Workshopped different approaches to scaling the return calculation — on-demand vs pre-computed with SQS + Lambda, and when a Redis cache is appropriate
+
+Core design decisions — API structure, MWR vs TWR, IRR vs Modified Dietz, decoupling calculation logic from HTTP — were made independently and validated through conversation with the AI.
 
 ---
 
